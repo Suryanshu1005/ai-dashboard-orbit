@@ -50,6 +50,7 @@ export default function ChatInterface() {
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [previousChats, setPreviousChats] = useState<ChatListItem[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true); // Open by default on desktop
+  const [isLoadingChat, setIsLoadingChat] = useState(false); // Track if we're loading a chat
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const saveChatTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -62,21 +63,27 @@ export default function ChatInterface() {
     scrollToBottom();
   }, [messages]);
 
+  // Fetch active connection only once on mount
   useEffect(() => {
-    fetchTables();
     fetchActiveConnection();
-    fetchPreviousChats();
-  }, [activeConnectionId]);
+  }, []); // Empty dependency array - only run once
 
-  // Save chat when messages change (debounced)
+  // Fetch tables and chats when activeConnectionId changes
   useEffect(() => {
-    if (messages.length > 0) {
-      // Clear existing timeout
+    if (activeConnectionId) {
+      fetchTables();
+      fetchPreviousChats();
+    }
+  }, [activeConnectionId]); // Only run when activeConnectionId actually changes
+
+  // Save chat when messages change (debounced for updates)
+  // Don't save if we're just loading a chat (to prevent unnecessary updatedAt changes)
+  useEffect(() => {
+    if (messages.length > 0 && currentChatId && !isLoadingChat) {
+      // For existing chats, debounce the update (save after 2 seconds of no new messages)
       if (saveChatTimeoutRef.current) {
         clearTimeout(saveChatTimeoutRef.current);
       }
-
-      // Debounce chat saving (save after 2 seconds of no new messages)
       saveChatTimeoutRef.current = setTimeout(() => {
         saveChat();
       }, 2000);
@@ -87,7 +94,7 @@ export default function ChatInterface() {
         clearTimeout(saveChatTimeoutRef.current);
       }
     };
-  }, [messages]);
+  }, [messages, currentChatId, isLoadingChat]);
 
   const fetchActiveConnection = async () => {
     try {
@@ -139,11 +146,14 @@ export default function ChatInterface() {
     }
   };
 
-  const saveChat = async () => {
-    if (messages.length === 0) return;
+  const createNewChatWithMessages = async (messagesToCreate: Message[]): Promise<string | null> => {
+    if (messagesToCreate.length === 0) {
+      console.warn('Cannot create chat: no messages provided');
+      return null;
+    }
 
     try {
-      const messagesToSave = messages.map((msg) => ({
+      const messagesToSave = messagesToCreate.map((msg) => ({
         id: msg.id,
         role: msg.role,
         content: msg.content,
@@ -153,38 +163,81 @@ export default function ChatInterface() {
         timestamp: msg.timestamp.toISOString(),
       }));
 
-      if (currentChatId) {
-        // Update existing chat
-        const response = await fetch(`/api/chats/${currentChatId}`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            messages: messagesToSave,
-          }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          await fetchPreviousChats();
-        }
+      console.log('Creating chat with messages:', messagesToSave.length, 'connectionId:', activeConnectionId);
+
+      const response = await fetch('/api/chats', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: messagesToSave,
+          connectionId: activeConnectionId || undefined,
+        }),
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Failed to create chat' }));
+        console.error('Chat creation failed - HTTP error:', response.status, errorData);
+        throw new Error(errorData.error || 'Failed to create chat');
+      }
+
+      const data = await response.json();
+      console.log('Chat creation response:', data);
+      
+      if (data.success && data.chat) {
+        console.log('Chat created successfully:', data.chat.id);
+        setCurrentChatId(data.chat.id);
+        await fetchPreviousChats();
+        return data.chat.id;
       } else {
-        // Create new chat
-        const response = await fetch('/api/chats', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            messages: messagesToSave,
-            connectionId: activeConnectionId || undefined,
-          }),
-        });
-        const data = await response.json();
-        if (data.success) {
-          setCurrentChatId(data.chat.id);
-          await fetchPreviousChats();
-        }
+        const errorMsg = data.error || 'Unknown error';
+        console.error('Failed to create chat:', errorMsg);
+        throw new Error(errorMsg);
+      }
+    } catch (err: any) {
+      console.error('Failed to create chat:', err);
+      console.error('Error details:', err.message, err.stack);
+      return null;
+    }
+  };
+
+  const saveChat = async () => {
+    // Use current messages state
+    const currentMessages = messages;
+    if (currentMessages.length === 0) return;
+
+    // If no chat ID exists, create a new chat
+    if (!currentChatId) {
+      await createNewChatWithMessages(currentMessages);
+      return;
+    }
+
+    try {
+      const messagesToSave = currentMessages.map((msg) => ({
+        id: msg.id,
+        role: msg.role,
+        content: msg.content,
+        query: msg.query,
+        results: msg.results,
+        columns: msg.columns,
+        timestamp: msg.timestamp.toISOString(),
+      }));
+
+      // Update existing chat
+      const response = await fetch(`/api/chats/${currentChatId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: messagesToSave,
+        }),
+      });
+      
+      const data = await response.json();
+      if (data.success) {
+        await fetchPreviousChats();
       }
     } catch (err) {
       console.error('Failed to save chat:', err);
@@ -192,6 +245,7 @@ export default function ChatInterface() {
   };
 
   const loadChat = async (chatId: string) => {
+    setIsLoadingChat(true); // Prevent saveChat from running during load
     try {
       const response = await fetch(`/api/chats/${chatId}`);
       const data = await response.json();
@@ -208,9 +262,17 @@ export default function ChatInterface() {
         setMessages(loadedMessages);
         setCurrentChatId(data.chat.id);
         setSidebarOpen(false);
+        // Scroll to bottom when loading a chat
+        setTimeout(() => {
+          scrollToBottom();
+          setIsLoadingChat(false); // Re-enable saving after load completes
+        }, 500); // Give enough time for state to settle
+      } else {
+        setIsLoadingChat(false);
       }
     } catch (err) {
       console.error('Failed to load chat:', err);
+      setIsLoadingChat(false);
     }
   };
 
@@ -247,9 +309,17 @@ export default function ChatInterface() {
       timestamp: new Date(),
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    const newMessages = [...messages, userMessage];
+    setMessages(newMessages);
     setInput('');
     setLoading(true);
+
+    // If this is the first message and no chat exists, create chat immediately
+    const isFirstMessage = messages.length === 0;
+    let newChatId: string | null = null;
+    if (isFirstMessage && !currentChatId) {
+      newChatId = await createNewChatWithMessages(newMessages);
+    }
 
     try {
       const response = await fetch('/api/query', {
@@ -272,7 +342,38 @@ export default function ChatInterface() {
           content: `Error: ${data.error}`,
           timestamp: new Date(),
         };
-        setMessages((prev) => [...prev, errorMessage]);
+        const updatedMessages = [...newMessages, errorMessage];
+        setMessages(updatedMessages);
+        
+        // If this was the first exchange, ensure chat is updated
+        if (isFirstMessage) {
+          const chatIdToUse = newChatId || currentChatId;
+          if (chatIdToUse) {
+            // Update the chat with both messages
+            setTimeout(async () => {
+              const response = await fetch(`/api/chats/${chatIdToUse}`, {
+                method: 'PATCH',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  messages: updatedMessages.map((msg) => ({
+                    id: msg.id,
+                    role: msg.role,
+                    content: msg.content,
+                    query: msg.query,
+                    results: msg.results,
+                    columns: msg.columns,
+                    timestamp: msg.timestamp.toISOString(),
+                  })),
+                }),
+              });
+              if (response.ok) {
+                await fetchPreviousChats();
+              }
+            }, 300);
+          }
+        }
       } else {
         const generatedQuery = data.query || data.sql || '';
         const queryResults = data.data || [];
@@ -287,7 +388,38 @@ export default function ChatInterface() {
           columns: queryColumns,
           timestamp: new Date(),
         };
-        setMessages((prev) => [...prev, assistantMessage]);
+        const updatedMessages = [...newMessages, assistantMessage];
+        setMessages(updatedMessages);
+        
+        // If this was the first exchange, ensure chat is updated
+        if (isFirstMessage) {
+          const chatIdToUse = newChatId || currentChatId;
+          if (chatIdToUse) {
+            // Update the chat with both messages
+            setTimeout(async () => {
+              const response = await fetch(`/api/chats/${chatIdToUse}`, {
+                method: 'PATCH',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  messages: updatedMessages.map((msg) => ({
+                    id: msg.id,
+                    role: msg.role,
+                    content: msg.content,
+                    query: msg.query,
+                    results: msg.results,
+                    columns: msg.columns,
+                    timestamp: msg.timestamp.toISOString(),
+                  })),
+                }),
+              });
+              if (response.ok) {
+                await fetchPreviousChats();
+              }
+            }, 300);
+          }
+        }
       }
     } catch (err: any) {
       const errorMessage: Message = {
@@ -296,7 +428,38 @@ export default function ChatInterface() {
         content: `Error: ${err.message || 'Failed to execute query'}`,
         timestamp: new Date(),
       };
-      setMessages((prev) => [...prev, errorMessage]);
+      const updatedMessages = [...newMessages, errorMessage];
+      setMessages(updatedMessages);
+      
+      // If this was the first exchange, ensure chat is updated
+      if (isFirstMessage) {
+        const chatIdToUse = newChatId || currentChatId;
+        if (chatIdToUse) {
+          // Update the chat with both messages
+          setTimeout(async () => {
+            const response = await fetch(`/api/chats/${chatIdToUse}`, {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                messages: updatedMessages.map((msg) => ({
+                  id: msg.id,
+                  role: msg.role,
+                  content: msg.content,
+                  query: msg.query,
+                  results: msg.results,
+                  columns: msg.columns,
+                  timestamp: msg.timestamp.toISOString(),
+                })),
+              }),
+            });
+            if (response.ok) {
+              await fetchPreviousChats();
+            }
+          }, 300);
+        }
+      }
     } finally {
       setLoading(false);
     }

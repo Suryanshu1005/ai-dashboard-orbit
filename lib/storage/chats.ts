@@ -95,35 +95,55 @@ export async function createChat(
   title?: string
 ): Promise<Chat> {
   if (!isMongoDBConfigured()) {
+    console.error('MongoDB not configured');
     throw new Error('MongoDB is required for saving chats. Please configure MONGODB_URI in .env.local');
   }
 
-  const collection = await getChatsCollection();
+  if (!messages || messages.length === 0) {
+    console.error('Cannot create chat: no messages provided');
+    throw new Error('Cannot create chat without messages');
+  }
 
-  // Generate title from first user message if not provided
-  const chatTitle = title || (messages.length > 0 ? generateTitle(messages[0].content) : 'New Chat');
+  try {
+    const collection = await getChatsCollection();
 
-  const newChat: MongoChat = {
-    id: Date.now().toString(),
-    userId,
-    connectionId,
-    title: chatTitle,
-    messages: messages.map((msg) => ({
-      id: msg.id,
-      role: msg.role,
-      content: msg.content,
-      query: msg.query,
-      results: msg.results,
-      columns: msg.columns,
-      timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
-    })),
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  };
+    // Generate title from first user message if not provided
+    const chatTitle = title || (messages.length > 0 ? generateTitle(messages[0].content) : 'New Chat');
 
-  await collection.insertOne(newChat);
+    const newChat: MongoChat = {
+      id: Date.now().toString(),
+      userId,
+      connectionId,
+      title: chatTitle,
+      messages: messages.map((msg) => ({
+        id: msg.id,
+        role: msg.role,
+        content: msg.content,
+        query: msg.query,
+        results: msg.results,
+        columns: msg.columns,
+        timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+      })),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
 
-  return mongoToChat(newChat);
+    console.log('Inserting chat into MongoDB:', {
+      id: newChat.id,
+      userId,
+      connectionId,
+      title: chatTitle,
+      messageCount: newChat.messages.length,
+    });
+
+    const result = await collection.insertOne(newChat);
+    console.log('Chat inserted successfully:', result.insertedId);
+
+    return mongoToChat(newChat);
+  } catch (error: any) {
+    console.error('Error creating chat in MongoDB:', error);
+    throw error;
+  }
 }
 
 /**
@@ -189,7 +209,8 @@ export async function updateChat(
   updates: {
     messages?: ChatMessage[];
     title?: string;
-  }
+  },
+  updateTimestamp: boolean = true // Only update timestamp if messages actually changed
 ): Promise<Chat | null> {
   if (!isMongoDBConfigured()) {
     return null;
@@ -202,12 +223,11 @@ export async function updateChat(
       return null;
     }
 
-    const updateDoc: any = {
-      updatedAt: new Date(),
-    };
+    const updateDoc: any = {};
 
+    // Only update timestamp if messages are being updated and they're different
     if (updates.messages !== undefined) {
-      updateDoc.messages = updates.messages.map((msg) => ({
+      const newMessages = updates.messages.map((msg) => ({
         id: msg.id,
         role: msg.role,
         content: msg.content,
@@ -216,16 +236,38 @@ export async function updateChat(
         columns: msg.columns,
         timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
       }));
+
+      // Check if messages actually changed
+      const messagesChanged = 
+        existing.messages.length !== newMessages.length ||
+        JSON.stringify(existing.messages) !== JSON.stringify(newMessages);
+
+      updateDoc.messages = newMessages;
+
+      // Only update timestamp if messages actually changed
+      if (updateTimestamp && messagesChanged) {
+        updateDoc.updatedAt = new Date();
+      }
+    } else if (updateTimestamp) {
+      // If only title is being updated, still update timestamp
+      updateDoc.updatedAt = new Date();
     }
 
     if (updates.title !== undefined) {
       updateDoc.title = updates.title.trim();
+      // Update timestamp when title changes
+      if (updateTimestamp) {
+        updateDoc.updatedAt = new Date();
+      }
     }
 
-    await collection.updateOne(
-      { id: chatId, userId },
-      { $set: updateDoc }
-    );
+    // Only perform update if there are actual changes
+    if (Object.keys(updateDoc).length > 0) {
+      await collection.updateOne(
+        { id: chatId, userId },
+        { $set: updateDoc }
+      );
+    }
 
     const updated = await collection.findOne({ id: chatId, userId });
     return updated ? mongoToChat(updated) : null;
