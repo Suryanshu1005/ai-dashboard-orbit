@@ -4,7 +4,8 @@ import {
   createChat,
   getChats,
 } from '@/lib/storage/chats';
-import { getActiveConnection, getConnectionStore } from '@/lib/db/connectors';
+import { getActiveConnection } from '@/lib/storage/connections';
+import { getConnectionStore } from '@/lib/db/connectors';
 import crypto from 'crypto';
 
 export async function GET(request: Request) {
@@ -47,7 +48,10 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { messages, title, connectionId } = body;
 
+    console.log('Creating chat - messages:', messages?.length, 'connectionId:', connectionId);
+
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      console.error('Invalid messages array:', messages);
       return NextResponse.json(
         { success: false, error: 'Messages array is required' },
         { status: 400 }
@@ -59,28 +63,33 @@ export async function POST(request: Request) {
     
     if (connectionId) {
       finalConnectionId = connectionId;
+      console.log('Using provided connectionId:', finalConnectionId);
     } else {
       // Try to get active connection
       const activeConnection = await getActiveConnection(session.user.id);
       
       if (activeConnection) {
         finalConnectionId = activeConnection.id;
+        console.log('Using active connection:', finalConnectionId);
       } else {
         // Create a hash-based connection ID for unsaved connections
         const store = getConnectionStore();
         if (store.connectionString) {
           const hash = crypto.createHash('sha256').update(store.connectionString).digest('hex').substring(0, 16);
           finalConnectionId = `temp_${hash}`;
+          console.log('Using temp connectionId:', finalConnectionId);
         } else {
-          return NextResponse.json(
-            { success: false, error: 'No database connection available' },
-            { status: 400 }
-          );
+          // Use a default connection ID if no connection is available
+          // This allows chats to be created even without an active connection
+          finalConnectionId = `default_${session.user.id}`;
+          console.log('Using default connectionId:', finalConnectionId);
         }
       }
     }
 
+    console.log('Creating chat with connectionId:', finalConnectionId, 'messages count:', messages.length);
     const chat = await createChat(session.user.id, finalConnectionId, messages, title);
+    console.log('Chat created successfully:', chat.id);
 
     return NextResponse.json({
       success: true,

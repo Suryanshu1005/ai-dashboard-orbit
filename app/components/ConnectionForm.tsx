@@ -24,7 +24,7 @@ export default function ConnectionForm({ onConnect }: ConnectionFormProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
-  const [saveConnection, setSaveConnection] = useState(false);
+  const [saveConnection, setSaveConnection] = useState(true); // Default to saving connections
   const [connectionName, setConnectionName] = useState('');
   const [savedConnections, setSavedConnections] = useState<SavedConnection[]>([]);
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
@@ -33,11 +33,14 @@ export default function ConnectionForm({ onConnect }: ConnectionFormProps) {
   const handleDisconnect = () => {
     setConnected(false);
     setConnectionString('');
+    setSelectedConnectionId(null);
     onConnect(false);
   };
 
   useEffect(() => {
     fetchSavedConnections();
+    // Don't auto-load active connection - let user choose
+    // This allows users to connect to a new connection even if one exists
   }, []);
 
   const fetchSavedConnections = async () => {
@@ -46,11 +49,8 @@ export default function ConnectionForm({ onConnect }: ConnectionFormProps) {
       const data = await response.json();
       if (data.success) {
         setSavedConnections(data.connections || []);
-        // Auto-select active connection
-        const active = data.connections.find((c: SavedConnection) => c.isActive);
-        if (active) {
-          loadConnection(active.id);
-        }
+        // Don't auto-load active connection - let user explicitly choose
+        // If they want to use the active connection, they can select it from the dropdown
       }
     } catch (err) {
       console.error('Failed to fetch connections:', err);
@@ -58,6 +58,11 @@ export default function ConnectionForm({ onConnect }: ConnectionFormProps) {
   };
 
   const loadConnection = async (connectionId: string) => {
+    // Prevent loading if already loading or if it's the same connection
+    if (loading || selectedConnectionId === connectionId) {
+      return;
+    }
+
     setLoading(true);
     setError('');
     try {
@@ -71,7 +76,7 @@ export default function ConnectionForm({ onConnect }: ConnectionFormProps) {
         setSelectedConnectionId(connectionId);
         setConnected(true);
         onConnect(true);
-        await fetchSavedConnections();
+        // Don't refetch connections here to avoid loops - the activation is already done
       } else {
         setError(activateData.error || 'Failed to activate connection');
       }
@@ -82,14 +87,33 @@ export default function ConnectionForm({ onConnect }: ConnectionFormProps) {
     }
   };
 
+  // Auto-generate connection name from connection string
+  const generateConnectionName = (connString: string, dbType: DatabaseType): string => {
+    try {
+      if (dbType === 'mongodb') {
+        // mongodb://host:port/database or mongodb+srv://host/database
+        const match = connString.match(/mongodb(\+srv)?:\/\/([^\/]+)(\/([^?]+))?/);
+        if (match) {
+          const host = match[2].split(':')[0];
+          const database = match[4] || 'default';
+          return `${host}/${database}`;
+        }
+      } else {
+        // postgresql://user:pass@host:port/database
+        const url = new URL(connString);
+        const host = url.hostname;
+        const database = url.pathname.slice(1) || 'default';
+        return `${host}/${database}`;
+      }
+    } catch (e) {
+      // If parsing fails, use a generic name
+    }
+    return `${dbType} Connection`;
+  };
+
   const handleConnect = async () => {
     if (!connectionString.trim()) {
       setError('Please enter a connection string');
-      return;
-    }
-
-    if (saveConnection && !connectionName.trim()) {
-      setError('Please enter a connection name to save');
       return;
     }
 
@@ -118,24 +142,30 @@ export default function ConnectionForm({ onConnect }: ConnectionFormProps) {
         return;
       }
 
-      // If save is checked, save the connection
+      // Always save the connection (unless user explicitly unchecks)
       if (saveConnection) {
+        // Auto-generate name if not provided
+        const finalConnectionName = connectionName.trim() || generateConnectionName(connectionString.trim(), dbType);
+        
         const saveResponse = await fetch('/api/connections', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            name: connectionName.trim(),
+            name: finalConnectionName,
             dbType,
             connectionString: connectionString.trim(),
           }),
         });
 
         const saveData = await saveResponse.json();
+        console.log('Save connection response:', saveData);
+        
         if (!saveData.success) {
-          setError(saveData.error || 'Connection successful but failed to save');
-          console.error('Failed to save connection:', saveData.error);
+          // Show error to user
+          setError(`Connection successful but failed to save: ${saveData.error || 'Unknown error'}`);
+          console.error('Connection successful but failed to save:', saveData.error);
         } else {
           // Connection saved successfully, now activate it
           const activateResponse = await fetch(`/api/connections/${saveData.connection.id}/activate`, {
@@ -260,13 +290,13 @@ export default function ConnectionForm({ onConnect }: ConnectionFormProps) {
             {saveConnection && (
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Connection Name
+                  Connection Name <span className="text-gray-500 font-normal">(optional, auto-generated if empty)</span>
                 </label>
                 <input
                   type="text"
                   value={connectionName}
                   onChange={(e) => setConnectionName(e.target.value)}
-                  placeholder="e.g., Production DB"
+                  placeholder="e.g., Production DB (leave empty for auto-generated name)"
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white text-gray-900"
                   disabled={loading}
                 />
@@ -300,12 +330,25 @@ export default function ConnectionForm({ onConnect }: ConnectionFormProps) {
               </div>
               <p className="text-sm text-green-700">{dbType.toUpperCase()}</p>
             </div>
-            <button
-              onClick={handleDisconnect}
-              className="w-full bg-gray-200 text-gray-700 py-2.5 px-4 rounded-md hover:bg-gray-300 transition-colors font-medium"
-            >
-              Disconnect
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={handleDisconnect}
+                className="flex-1 bg-gray-200 text-gray-700 py-2.5 px-4 rounded-md hover:bg-gray-300 transition-colors font-medium"
+              >
+                Disconnect
+              </button>
+              <button
+                onClick={() => {
+                  handleDisconnect();
+                  // Clear form to allow new connection
+                  setConnectionString('');
+                  setConnectionName('');
+                }}
+                className="flex-1 bg-blue-600 text-white py-2.5 px-4 rounded-md hover:bg-blue-700 transition-colors font-medium"
+              >
+                Connect to Different DB
+              </button>
+            </div>
           </div>
         )}
       </div>

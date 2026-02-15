@@ -116,40 +116,71 @@ export async function createConnection(
   queryTimeout?: number
 ): Promise<SavedConnection> {
   if (!isMongoDBConfigured()) {
+    console.error('MongoDB not configured for saving connections');
     throw new Error('MongoDB is required for saving connections. Please configure MONGODB_URI in .env.local');
   }
 
-  const collection = await getConnectionsCollection();
+  try {
+    const collection = await getConnectionsCollection();
+    console.log('Creating connection:', { userId, name, dbType, hasConnectionString: !!connectionString });
 
-  // Encrypt connection string
-  const encryptedConnectionString = encrypt(connectionString);
+    // Check for duplicate connection name
+    const existing = await collection.findOne({ userId, name: name.trim() });
+    if (existing) {
+      console.warn('Connection with same name already exists:', existing.id);
+      throw new Error(`Connection with name "${name.trim()}" already exists. Please use a different name.`);
+    }
 
-  // Parse connection string for display fields
-  const { host, database } = parseConnectionString(connectionString, dbType);
+    // Encrypt connection string
+    let encryptedConnectionString: string;
+    try {
+      encryptedConnectionString = encrypt(connectionString);
+      console.log('Connection string encrypted successfully');
+    } catch (encryptError: any) {
+      console.error('Encryption error:', encryptError);
+      throw new Error(`Failed to encrypt connection string: ${encryptError.message}`);
+    }
 
-  // Set all other connections as inactive
-  await collection.updateMany(
-    { userId },
-    { $set: { isActive: false } }
-  );
+    // Parse connection string for display fields
+    const { host, database } = parseConnectionString(connectionString, dbType);
 
-  const newConnection: MongoConnection = {
-    id: Date.now().toString(),
-    userId,
-    name: name.trim(),
-    dbType,
-    encryptedConnectionString,
-    host,
-    database,
-    isActive: true,
-    queryTimeout: queryTimeout || 30000,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  };
+    // Set all other connections as inactive
+    await collection.updateMany(
+      { userId },
+      { $set: { isActive: false } }
+    );
 
-  await collection.insertOne(newConnection);
+    const newConnection: MongoConnection = {
+      id: Date.now().toString(),
+      userId,
+      name: name.trim(),
+      dbType,
+      encryptedConnectionString,
+      host,
+      database,
+      isActive: true,
+      queryTimeout: queryTimeout || 30000,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
 
-  return mongoToConnection(newConnection);
+    console.log('Inserting connection into MongoDB:', {
+      id: newConnection.id,
+      userId,
+      name: newConnection.name,
+      dbType: newConnection.dbType,
+      host: newConnection.host,
+      database: newConnection.database,
+    });
+
+    const result = await collection.insertOne(newConnection);
+    console.log('Connection inserted successfully:', result.insertedId);
+
+    return mongoToConnection(newConnection);
+  } catch (error: any) {
+    console.error('Error creating connection:', error);
+    throw error;
+  }
 }
 
 /**

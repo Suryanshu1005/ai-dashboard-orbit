@@ -55,7 +55,16 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { name, dbType, connectionString, queryTimeout } = body;
 
+    console.log('POST /api/connections - Request:', {
+      userId: session.user.id,
+      name,
+      dbType,
+      hasConnectionString: !!connectionString,
+      queryTimeout,
+    });
+
     if (!name || !name.trim()) {
+      console.error('Validation failed: Connection name is required');
       return NextResponse.json(
         { success: false, error: 'Connection name is required' },
         { status: 400 }
@@ -63,6 +72,7 @@ export async function POST(request: Request) {
     }
 
     if (!dbType || !['postgresql', 'mysql', 'mongodb', 'mssql'].includes(dbType)) {
+      console.error('Validation failed: Invalid database type:', dbType);
       return NextResponse.json(
         { success: false, error: 'Valid database type is required' },
         { status: 400 }
@@ -70,12 +80,14 @@ export async function POST(request: Request) {
     }
 
     if (!connectionString || !connectionString.trim()) {
+      console.error('Validation failed: Connection string is required');
       return NextResponse.json(
         { success: false, error: 'Connection string is required' },
         { status: 400 }
       );
     }
 
+    console.log('Calling createConnection...');
     const connection = await createConnection(
       session.user.id,
       name,
@@ -83,6 +95,8 @@ export async function POST(request: Request) {
       connectionString,
       queryTimeout
     );
+
+    console.log('Connection created successfully:', connection.id);
 
     return NextResponse.json({
       success: true,
@@ -99,6 +113,7 @@ export async function POST(request: Request) {
       },
     });
   } catch (error: any) {
+    console.error('Error in POST /api/connections:', error);
     return NextResponse.json(
       { success: false, error: error.message || 'Failed to create connection' },
       { status: 500 }
