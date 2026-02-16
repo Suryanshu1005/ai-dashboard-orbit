@@ -26,8 +26,8 @@ interface MongoConnection {
   name: string;
   dbType: DatabaseType;
   encryptedConnectionString: string;
-  host?: string;
-  database?: string;
+  encryptedHost?: string; // Encrypted host
+  encryptedDatabase?: string; // Encrypted database
   isActive: boolean;
   queryTimeout?: number;
   createdAt: Date;
@@ -45,16 +45,49 @@ async function getConnectionsCollection() {
 
 /**
  * Convert MongoDB document to SavedConnection interface
+ * Decrypts host and database fields for display
  */
 function mongoToConnection(doc: MongoConnection): SavedConnection {
+  let host: string | undefined;
+  let database: string | undefined;
+
+  // Decrypt host if present
+  if (doc.encryptedHost) {
+    try {
+      host = decrypt(doc.encryptedHost);
+    } catch (error) {
+      console.error('Error decrypting host:', error);
+      // If decryption fails, don't expose the encrypted value
+      host = undefined;
+    }
+  } else if ((doc as any).host) {
+    // Legacy: if old unencrypted host exists, use it (for migration)
+    // This handles existing records that might have plain text host
+    host = (doc as any).host;
+  }
+
+  // Decrypt database if present
+  if (doc.encryptedDatabase) {
+    try {
+      database = decrypt(doc.encryptedDatabase);
+    } catch (error) {
+      console.error('Error decrypting database:', error);
+      // If decryption fails, don't expose the encrypted value
+      database = undefined;
+    }
+  } else if ((doc as any).database) {
+    // Legacy: if old unencrypted database exists, use it (for migration)
+    database = (doc as any).database;
+  }
+
   return {
     id: doc.id,
     userId: doc.userId,
     name: doc.name,
     dbType: doc.dbType,
     encryptedConnectionString: doc.encryptedConnectionString,
-    host: doc.host,
-    database: doc.database,
+    host,
+    database,
     isActive: doc.isActive,
     queryTimeout: doc.queryTimeout || 30000,
     createdAt: doc.createdAt instanceof Date ? doc.createdAt.toISOString() : doc.createdAt,
@@ -144,6 +177,30 @@ export async function createConnection(
     // Parse connection string for display fields
     const { host, database } = parseConnectionString(connectionString, dbType);
 
+    // Encrypt host and database before storing
+    let encryptedHost: string | undefined;
+    let encryptedDatabase: string | undefined;
+
+    if (host) {
+      try {
+        encryptedHost = encrypt(host);
+        console.log('Host encrypted successfully');
+      } catch (encryptError: any) {
+        console.error('Error encrypting host:', encryptError);
+        throw new Error(`Failed to encrypt host: ${encryptError.message}`);
+      }
+    }
+
+    if (database) {
+      try {
+        encryptedDatabase = encrypt(database);
+        console.log('Database encrypted successfully');
+      } catch (encryptError: any) {
+        console.error('Error encrypting database:', encryptError);
+        throw new Error(`Failed to encrypt database: ${encryptError.message}`);
+      }
+    }
+
     // Set all other connections as inactive
     await collection.updateMany(
       { userId },
@@ -156,8 +213,8 @@ export async function createConnection(
       name: name.trim(),
       dbType,
       encryptedConnectionString,
-      host,
-      database,
+      encryptedHost,
+      encryptedDatabase,
       isActive: true,
       queryTimeout: queryTimeout || 30000,
       createdAt: new Date(),
@@ -169,8 +226,8 @@ export async function createConnection(
       userId,
       name: newConnection.name,
       dbType: newConnection.dbType,
-      host: newConnection.host,
-      database: newConnection.database,
+      hasEncryptedHost: !!newConnection.encryptedHost,
+      hasEncryptedDatabase: !!newConnection.encryptedDatabase,
     });
 
     const result = await collection.insertOne(newConnection);
@@ -294,17 +351,48 @@ export async function updateConnection(
     if (updates.connectionString !== undefined) {
       updateDoc.encryptedConnectionString = encrypt(updates.connectionString);
       const { host, database } = parseConnectionString(updates.connectionString, existing.dbType);
-      updateDoc.host = host;
-      updateDoc.database = database;
+      
+      // Encrypt host and database before storing
+      if (host) {
+        try {
+          updateDoc.encryptedHost = encrypt(host);
+        } catch (encryptError: any) {
+          console.error('Error encrypting host:', encryptError);
+          throw new Error(`Failed to encrypt host: ${encryptError.message}`);
+        }
+      } else {
+        updateDoc.encryptedHost = undefined;
+      }
+
+      if (database) {
+        try {
+          updateDoc.encryptedDatabase = encrypt(database);
+        } catch (encryptError: any) {
+          console.error('Error encrypting database:', encryptError);
+          throw new Error(`Failed to encrypt database: ${encryptError.message}`);
+        }
+      } else {
+        updateDoc.encryptedDatabase = undefined;
+      }
+
+      // Remove old unencrypted fields if they exist (migration)
+      updateDoc.$unset = { host: '', database: '' };
     }
 
     if (updates.queryTimeout !== undefined) {
       updateDoc.queryTimeout = updates.queryTimeout;
     }
 
+    // Build update operation - separate $set and $unset
+    const updateOperation: any = { $set: updateDoc };
+    if (updateDoc.$unset) {
+      updateOperation.$unset = updateDoc.$unset;
+      delete updateDoc.$unset; // Remove from $set
+    }
+
     await collection.updateOne(
       { id: connectionId, userId },
-      { $set: updateDoc }
+      updateOperation
     );
 
     const updated = await collection.findOne({ id: connectionId, userId });
